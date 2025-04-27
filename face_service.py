@@ -29,30 +29,34 @@ def detect_face_in_video(video_path: str) -> bool:
 
 # 2. 判断视频与照片是否为同一个人
 def is_same_person(video_path: str, image_path: str) -> bool:
-    # 取视频第一帧的人脸特征
+    # 1. 提取视频前30帧的人脸特征
     video = cv2.VideoCapture(video_path)
     video_face_encoding = None
-    while True:
+    frame_count = 0
+    while frame_count < 30:
         ret, frame = video.read()
         if not ret:
             break
-        rgb_frame = frame[:, :, ::-1]
-        faces = face_recognition.face_encodings(rgb_frame)
-        if len(faces) > 0:
-            video_face_encoding = faces[0]
+        frame_count += 1
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        encodings = face_recognition.face_encodings(rgb_frame)
+        if encodings:
+            video_face_encoding = encodings[0]
             break
     video.release()
     if video_face_encoding is None:
         return False
-    # 取图片人脸特征
+
+    # 2. 提取图片人脸特征
     image = face_recognition.load_image_file(image_path)
     image_encodings = face_recognition.face_encodings(image)
-    if len(image_encodings) == 0:
+    if not image_encodings:
         return False
     image_face_encoding = image_encodings[0]
-    # 比对
-    results = face_recognition.compare_faces([video_face_encoding], image_face_encoding)
-    return bool(results[0])
+
+    # 3. 计算欧氏距离
+    distance = np.linalg.norm(video_face_encoding - image_face_encoding)
+    return distance < 0.6  # 阈值可调整
 
 # 3. 判断照片类型（人脸照/半身照/全身照）
 def classify_photo_type(image_path: str) -> Literal['人脸照', '半身照', '全身照', '无法识别']:
@@ -91,7 +95,7 @@ def api_is_same_person(video: UploadFile = File(...), image: UploadFile = File(.
     with open(temp_image, "wb") as f:
         f.write(image.file.read())
     result = is_same_person(temp_video, temp_image)
-    return {"is_same_person": result}
+    return {"is_same_person": bool(result)}
 
 @app.post("/photo_type")
 def api_photo_type(image: UploadFile = File(...)):
