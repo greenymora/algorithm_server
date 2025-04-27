@@ -6,8 +6,10 @@ import numpy as np
 import mediapipe as mp
 from PIL import Image
 import io
+from fastapi import APIRouter
 
 app = FastAPI()
+router = APIRouter(prefix="/face")
 
 # 1. 判断视频中是否包含人脸
 def detect_face_in_video(video_path: str) -> bool:
@@ -78,7 +80,7 @@ def classify_photo_type(image_path: str) -> Literal['人脸照', '半身照', '�
         else:
             return '人脸照'
 
-@app.post("/has_face_in_video")
+@router.post("/has_face_in_video")
 def api_has_face_in_video(video: UploadFile = File(...)):
     temp_path = f"/tmp/{video.filename}"
     with open(temp_path, "wb") as f:
@@ -86,7 +88,7 @@ def api_has_face_in_video(video: UploadFile = File(...)):
     result = detect_face_in_video(temp_path)
     return {"has_face": result}
 
-@app.post("/is_same_person")
+@router.post("/is_same_person")
 def api_is_same_person(video: UploadFile = File(...), image: UploadFile = File(...)):
     temp_video = f"/tmp/{video.filename}"
     temp_image = f"/tmp/{image.filename}"
@@ -97,10 +99,12 @@ def api_is_same_person(video: UploadFile = File(...), image: UploadFile = File(.
     result = is_same_person(temp_video, temp_image)
     return {"is_same_person": bool(result)}
 
-@app.post("/photo_type")
+@router.post("/photo_type")
 def api_photo_type(image: UploadFile = File(...)):
     temp_image = f"/tmp/{image.filename}"
     with open(temp_image, "wb") as f:
         f.write(image.file.read())
     result = classify_photo_type(temp_image)
-    return {"photo_type": result} 
+    return {"photo_type": result}
+
+app.include_router(router) 

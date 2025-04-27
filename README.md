@@ -28,10 +28,10 @@ uvicorn face_service:app --reload
 
 ---
 
-## 接口说明
+## 接口说明（所有接口均加 /face 前缀）
 
 ### 1. 判断视频中是否包含人脸
-- 路径：`/has_face_in_video`
+- 路径：`/face/has_face_in_video`
 - 方法：POST
 - 参数：上传视频文件（form-data，字段名为`video`）
 - 返回：
@@ -40,7 +40,7 @@ uvicorn face_service:app --reload
   ```
 
 ### 2. 判断视频与照片是否为同一个人
-- 路径：`/is_same_person`
+- 路径：`/face/is_same_person`
 - 方法：POST
 - 参数：上传视频文件（字段名`video`）和照片文件（字段名`image`）
 - 返回：
@@ -49,7 +49,7 @@ uvicorn face_service:app --reload
   ```
 
 ### 3. 根据照片判断人脸照、半身照、全身照
-- 路径：`/photo_type`
+- 路径：`/face/photo_type`
 - 方法：POST
 - 参数：上传照片文件（字段名`image`）
 - 返回：
