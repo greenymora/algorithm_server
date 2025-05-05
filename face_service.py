@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File
-from typing import Literal
+from typing import Literal, Optional
 import face_recognition
 import cv2
 import numpy as np
@@ -14,6 +14,7 @@ import dashscope
 from dashscope import MultiModalConversation
 import re
 import os
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 router = APIRouter(prefix="/face")
@@ -21,7 +22,61 @@ router = APIRouter(prefix="/face")
 # 初始化PaddleOCR
 paddle_ocr = paddleocr.PaddleOCR(use_angle_cls=True, lang="ch")
 
-def extract_time_from_text(text: str) -> str:
+def standardize_time_format(time_str: str) -> Optional[str]:
+    """将各种格式的时间字符串转换为标准格式 (YYYY-MM-DD HH:mm:ss)"""
+    if not time_str:
+        return None
+        
+    # 定义可能的时间格式
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y年%m月%d日 %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y.%m.%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y年%m月%d日 %H:%M",
+        "%Y/%m/%d %H:%M",
+        "%Y.%m.%d %H:%M",
+        "%Y-%m-%d",
+        "%Y年%m月%d日",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+        "%H:%M:%S",
+        "%H:%M"
+    ]
+    
+    # 尝试解析时间字符串
+    parsed_time = None
+    for fmt in formats:
+        try:
+            parsed_time = datetime.strptime(time_str.strip(), fmt)
+            break
+        except ValueError:
+            continue
+            
+    # 如果只有时间没有日期，使用当前日期
+    if parsed_time and len(time_str) <= 8 and ":" in time_str:  # 处理纯时间格式
+        current_date = datetime.now()
+        parsed_time = parsed_time.replace(
+            year=current_date.year,
+            month=current_date.month,
+            day=current_date.day
+        )
+    
+    # 如果没有时间，补充为当天0点
+    if parsed_time and parsed_time.hour == 0 and parsed_time.minute == 0 and parsed_time.second == 0:
+        if len(time_str) <= 10:  # 只有日期的情况
+            current_time = datetime.now()
+            parsed_time = parsed_time.replace(
+                hour=current_time.hour,
+                minute=current_time.minute,
+                second=current_time.second
+            )
+    
+    # 返回标准格式的时间字符串
+    return parsed_time.strftime("%Y-%m-%d %H:%M:%S") if parsed_time else None
+
+def extract_time_from_text(text: str) -> Optional[str]:
     """从文本中提取时间信息"""
     # 匹配常见的时间格式
     patterns = [
@@ -38,6 +93,7 @@ def extract_time_from_text(text: str) -> str:
         r'(\d{4}年\d{1,2}月\d{1,2}日)',
         r'(\d{4}-\d{1,2}-\d{1,2})',
         r'(\d{4}/\d{1,2}/\d{1,2})',
+        r'(\d{4}\.\d{1,2}\.\d{1,2})',
         
         # 仅时间格式
         r'(\d{1,2}:\d{1,2}(?::\d{1,2})?)'
@@ -49,10 +105,10 @@ def extract_time_from_text(text: str) -> str:
     for pattern in patterns:
         matches = re.finditer(pattern, text)
         for match in matches:
-            if '年' in pattern or '/' in pattern or '-' in pattern:
+            if '年' in pattern or '/' in pattern or '-' in pattern or '.' in pattern:
                 # 如果是完整的日期时间
                 if ':' in match.group(1):
-                    return match.group(1)
+                    return standardize_time_format(match.group(1))
                 # 如果是日期
                 found_dates.append(match.group(1))
             elif ':' in pattern:
@@ -63,21 +119,26 @@ def extract_time_from_text(text: str) -> str:
                 date = match.group(1)
                 time = match.group(2)
                 # 将日期和时间组合
-                return f"{date} {time}"
+                return standardize_time_format(f"{date} {time}")
     
     # 如果找到了日期和时间，尝试组合它们
     if found_dates and found_times:
         # 优先使用最长的时间格式（可能包含秒）
         longest_time = max(found_times, key=len)
-        return f"{found_dates[0]} {longest_time}"
+        return standardize_time_format(f"{found_dates[0]} {longest_time}")
     
-    # 如果只找到日期，返回日期
+    # 如果只找到日期，返回标准化的日期
     if found_dates:
-        return found_dates[0]
+        return standardize_time_format(found_dates[0])
         
+    # 如果只找到时间，使用当前日期
+    if found_times:
+        longest_time = max(found_times, key=len)
+        return standardize_time_format(longest_time)
+    
     return None
 
-async def get_time_from_qwen(image_path: str) -> str:
+async def get_time_from_qwen(image_path: str) -> Optional[str]:
     """使用通义千问多模态模型识别图片中的时间信息"""
     try:
         with open(image_path, 'rb') as f:
@@ -98,7 +159,9 @@ async def get_time_from_qwen(image_path: str) -> str:
         )
         
         if response.output and response.output.choices:
-            return response.output.choices[0].message.content
+            time_str = response.output.choices[0].message.content
+            if time_str != "未找到时间信息":
+                return standardize_time_format(time_str)
         return None
     except Exception as e:
         print(f"通义千问API调用错误: {str(e)}")
@@ -175,6 +238,7 @@ def classify_photo_type(image_path: str) -> Literal['人脸照', '半身照', '�
 
 # 4. 获取图片拍摄时间
 async def get_photo_taken_time(image_path: str) -> dict:
+    """获取照片拍摄时间，支持多种识别方式"""
     try:
         # 1. 首先尝试从EXIF中获取时间
         image = Image.open(image_path)
@@ -185,25 +249,30 @@ async def get_photo_taken_time(image_path: str) -> dict:
                 if tag == "DateTime" or tag == "DateTimeOriginal" or tag == "DateTimeDigitized":
                     date_str = exif.get(tag_id)
                     try:
-                        taken_time = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                        taken_time = standardize_time_format(date_str)
+                        if taken_time:
+                            return {
+                                "has_exif": True,
+                                "taken_time": taken_time,
+                                "error": None,
+                                "method": "exif"
+                            }
+                    except Exception as e:
                         return {
                             "has_exif": True,
-                            "taken_time": taken_time.strftime("%Y-%m-%d %H:%M:%S"),
-                            "error": None,
+                            "taken_time": None,
+                            "error": f"日期格式解析错误: {str(e)}",
                             "method": "exif"
                         }
-                    except Exception as e:
-                        return {"has_exif": True, "taken_time": date_str, "error": "日期格式解析错误", "method": "exif"}
 
         # 2. 如果没有EXIF，尝试使用OCR识别
         ocr_result = paddle_ocr.ocr(image_path, cls=True)
-        if ocr_result:
+        if ocr_result and len(ocr_result) > 0 and len(ocr_result[0]) > 0:
             # 将所有识别到的文本合并
             all_texts = []
             for line in ocr_result[0]:
                 text = line[1][0]
                 all_texts.append(text)
-                print(f"OCR识别文本: {text}")  # 调试输出
             
             text = " ".join(all_texts)
             time_str = extract_time_from_text(text)
@@ -213,12 +282,12 @@ async def get_photo_taken_time(image_path: str) -> dict:
                     "taken_time": time_str,
                     "error": None,
                     "method": "ocr",
-                    "raw_text": text  # 添加原始识别文本用于调试
+                    "raw_text": text
                 }
         
         # 3. 如果OCR也没识别到，使用通义千问
         qwen_result = await get_time_from_qwen(image_path)
-        if qwen_result and qwen_result != "未找到时间信息":
+        if qwen_result:
             return {
                 "has_exif": False,
                 "taken_time": qwen_result,
@@ -230,9 +299,9 @@ async def get_photo_taken_time(image_path: str) -> dict:
             "has_exif": False,
             "taken_time": None,
             "error": "无法识别到任何时间信息",
-            "method": None,
-            "raw_text": text if 'text' in locals() else None  # 添加原始识别文本用于调试
+            "method": None
         }
+        
     except Exception as e:
         return {
             "has_exif": False,
@@ -270,10 +339,23 @@ def api_photo_type(image: UploadFile = File(...)):
 
 @router.post("/photo_taken_time")
 async def api_photo_taken_time(image: UploadFile = File(...)):
-    temp_image = f"/tmp/{image.filename}"
-    with open(temp_image, "wb") as f:
-        f.write(image.file.read())
-    result = await get_photo_taken_time(temp_image)
-    return result
+    try:
+        temp_image = f"/tmp/{image.filename}"
+        contents = await image.read()
+        with open(temp_image, "wb") as f:
+            f.write(contents)
+            
+        result = await get_photo_taken_time(temp_image)
+        
+        if os.path.exists(temp_image):
+            os.remove(temp_image)
+            
+        return result
+        
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 app.include_router(router) 
