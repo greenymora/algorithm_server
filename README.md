@@ -137,6 +137,52 @@ export DASHSCOPE_API_KEY='your_api_key_here'
 3. 所有时间格式都会被标准化为 "YYYY-MM-DD HH:mm:ss"
 4. 如果时间格式无法解析，将返回错误信息
 
+### 5. 身高估算
+
+### 6. 判断两张图片是否为同一个人脸
+
+- **接口**：`/is_same_face`
+- **方法**：POST
+- **参数**：
+  - image1: 图片1（multipart/form-data）
+  - image2: 图片2（multipart/form-data）
+- **返回示例**：
+```json
+{
+    "is_same_face": true,
+    "distance": 0.42
+}
+```
+
+### 7. 从阿里OSS视频中抽取人物照片
+
+- **接口**：`/extract_face_from_oss_video`
+- **方法**：POST
+- **参数**：
+  - oss_url: 阿里OSS视频的URL（表单字段）
+- **返回示例**：
+```json
+{
+    "face_base64": "base64字符串"
+}
+```
+
+### 8. 紫微斗数排盘
+
+- **接口**：`/ziwei_chart`
+- **方法**：POST
+- **参数**：
+  - birthday: 生日，格式YYYY-MM-DD（表单字段）
+  - birth_time: 出生时间，格式HH:MM（表单字段）
+  - gender: 性别，男或女（表单字段）
+  - date_type: 历法类型，公历或农历（表单字段，默认公历）
+- **返回示例**：
+```json
+{
+    "result": "===== 紫微斗数排盘结果（公历 1989-02-17，酉时，女）=====\n命盘公历生日: ...\n..."
+}
+```
+
 ## 测试
 
 使用测试脚本进行功能测试：

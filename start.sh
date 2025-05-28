@@ -4,6 +4,7 @@
 APP_NAME="face_service"
 PORT=8000
 DASHSCOPE_API_KEY="sk-87ab9f92e45d40b7ad312f5356fa978c"  # 请替换为实际的API KEY
+VENV_PATH="./venv"
 
 # 颜色输出函数
 GREEN='\033[0;32m'
@@ -16,18 +17,6 @@ echo_success() {
 
 echo_error() {
     echo -e "${RED}$1${NC}"
-}
-
-# 检查并安装依赖
-check_dependencies() {
-    echo "检查依赖..."
-    pip list | grep -q "fastapi" || pip install fastapi
-    pip list | grep -q "uvicorn" || pip install uvicorn
-    pip list | grep -q "face-recognition" || pip install face-recognition
-    pip list | grep -q "paddleocr" || pip install paddleocr
-    pip list | grep -q "dashscope" || pip install dashscope
-    pip list | grep -q "python-multipart" || pip install python-multipart
-    echo_success "依赖检查完成"
 }
 
 # 停止旧进程
@@ -70,6 +59,9 @@ start_service() {
     # 设置环境变量
     export DASHSCOPE_API_KEY="$DASHSCOPE_API_KEY"
     
+    # 激活虚拟环境
+    source "$VENV_PATH/bin/activate"
+    
     # 使用nohup后台运行服务
     nohup uvicorn $APP_NAME:app --host 0.0.0.0 --port $PORT --reload > face_service.log 2>&1 &
     
@@ -94,9 +86,6 @@ start_service() {
 # 主流程
 main() {
     echo "=== 人脸服务启动脚本 ==="
-    
-    # 检查依赖
-    check_dependencies
     
     # 停止旧进程
     stop_old_process

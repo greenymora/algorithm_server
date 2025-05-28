@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from typing import Literal, Optional
 import face_recognition
 import cv2
@@ -15,6 +15,15 @@ from dashscope import MultiModalConversation
 import re
 import os
 from fastapi.responses import JSONResponse
+from py_iztro import Astro
+import traceback
+import subprocess
+import json
+import sys
+import base64
+from io import BytesIO
+from PIL import Image as PILImage
+import requests
 
 app = FastAPI()
 router = APIRouter(prefix="/face")
@@ -187,15 +196,25 @@ def detect_face_in_video(video_path: str) -> bool:
 
 # 2. 判断视频与照片是否为同一个人
 def is_same_person(video_path: str, image_path: str) -> bool:
-    # 1. 提取视频前30帧的人脸特征
+    # 1. 提取视频前15帧的人脸特征 (优化)
     video = cv2.VideoCapture(video_path)
     video_face_encoding = None
     frame_count = 0
-    while frame_count < 30:
+    max_frames_to_check = 15 # 修改为检查前15帧
+    target_width = 320 # 缩放目标宽度
+
+    while frame_count < max_frames_to_check:
         ret, frame = video.read()
         if not ret:
             break
         frame_count += 1
+
+        # 缩放帧 (优化)
+        img_h, img_w = frame.shape[:2]
+        if img_w > target_width:
+            scale = target_width / img_w
+            frame = cv2.resize(frame, (target_width, int(img_h * scale)))
+
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         encodings = face_recognition.face_encodings(rgb_frame)
         if encodings:
@@ -357,5 +376,241 @@ async def api_photo_taken_time(image: UploadFile = File(...)):
             status_code=500,
             content={"error": str(e)}
         )
+
+@router.post("/estimate_height")
+async def estimate_height(
+    image: UploadFile = File(...),
+    reference_height: Optional[float] = Form(None)  # 参照物实际高度（cm），可选
+):
+    temp_image = f"/tmp/{image.filename}"
+    try:
+        with open(temp_image, "wb") as f:
+            f.write(await image.read())
+        # 读取图片
+        img = cv2.imread(temp_image)
+        if img is None:
+            return JSONResponse(status_code=400, content={"error": "图片读取失败"})
+        # Mediapipe人体关键点检测
+        mp_pose = mp.solutions.pose
+        with mp_pose.Pose(static_image_mode=True) as pose:
+            results = pose.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            if not results.pose_landmarks:
+                return {"error": "未检测到人体关键点，无法估算身高"}
+            # 获取头顶和脚底关键点
+            landmarks = results.pose_landmarks.landmark
+            # 头顶：NOSE(0)或LEFT_EYE(1)/RIGHT_EYE(2)附近最高点
+            # 脚底：LEFT_HEEL(27), RIGHT_HEEL(28)
+            y_top = min([landmarks[0].y, landmarks[1].y, landmarks[2].y])
+            y_bottom = max([landmarks[27].y, landmarks[28].y])
+            img_h, img_w = img.shape[:2]
+            pixel_height = (y_bottom - y_top) * img_h
+            # 估算身高
+            if reference_height and reference_height > 0:
+                return {
+                    "pixel_height": pixel_height,
+                    "reference_height": reference_height,
+                    "estimate_height": None,
+                    "confidence": 0.0,
+                    "algorithm": "需要参照物像素高度，建议后续扩展自动检测或让用户标注",
+                    "error": "暂未实现参照物像素高度自动检测，请输入参照物像素高度后再试"
+                }
+            else:
+                estimate_height = pixel_height / img_h * 170
+                return {
+                    "pixel_height": pixel_height,
+                    "estimate_height": round(estimate_height, 2),
+                    "confidence": 0.5,
+                    "algorithm": "无参照物，采用标准人体比例估算，误差较大，仅供参考",
+                    "error": None
+                }
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        if os.path.exists(temp_image):
+            os.remove(temp_image)
+
+def format_star_list(star_list):
+    return '、'.join([
+        f"{star.name}{'('+star.brightness+')' if star.brightness else ''}{'['+star.mutagen+']' if star.mutagen else ''}"
+        for star in star_list
+    ]) if star_list else '无'
+
+def ziwei_full_chart_str(
+    gender: str,
+    date_type: str,  # "公历" 或 "农历"
+    date_str: str,   # "YYYY-MM-DD"
+    hour_index: int  # 0~11，子时=0，丑时=1...，午时=6
+):
+    print(f"[DEBUG] 调用ziwei_full_chart_str: gender={gender}, date_type={date_type}, date_str={date_str}, hour_index={hour_index}")
+    try:
+        astro = Astro()
+        print("[DEBUG] Astro对象创建成功")
+        if date_type == "公历":
+            print("[DEBUG] 调用astro.by_solar")
+            result = astro.by_solar(date_str, hour_index, gender)
+        elif date_type == "农历":
+            print("[DEBUG] 调用astro.by_lunar")
+            result = astro.by_lunar(date_str, hour_index, gender)
+        else:
+            raise ValueError("date_type 只能为 '公历' 或 '农历'")
+        print(f"[DEBUG] 排盘主结果: {result}")
+        today = datetime.today().strftime("%Y-%m-%d")
+        print(f"[DEBUG] today={today}")
+        horoscope = result.horoscope(today)
+        print(f"[DEBUG] horoscope={horoscope}")
+        lines = []
+        lines.append(f"===== 紫微斗数排盘结果（{date_type} {date_str}，{['子','丑','寅','卯','辰','巳','午','未','申','酉','戌','亥'][hour_index]}时，{gender}）=====")
+        lines.append(f"命盘公历生日: {result.solar_date}")
+        lines.append(f"命盘农历生日: {result.lunar_date}")
+        lines.append(f"四柱: {result.chinese_date}")
+        lines.append(f"生肖: {result.zodiac}  星座: {result.sign}")
+        lines.append(f"命宫: {result.earthly_branch_of_soul_palace}  身宫: {result.earthly_branch_of_body_palace}")
+        lines.append(f"命主: {result.soul}  身主: {result.body}")
+        lines.append(f"五行局: {result.five_elements_class}")
+        lines.append("")
+        for i in range(12):
+            palace = result.palaces[i]
+            lines.append(
+                f"宫位: {palace.name}\n"
+                f"  干支: {palace.heavenly_stem}{palace.earthly_branch}\n" 
+                f"  主星: {format_star_list(palace.major_stars)}\n"
+                f"  辅星: {format_star_list(palace.minor_stars)}\n"
+                f"  杂曜: {format_star_list(palace.adjective_stars)}\n"
+                f"  大运: 大运{horoscope.decadal.palace_names[i]}\n"
+                f"    大运星: {format_star_list(horoscope.decadal.stars[i])}\n"
+                f"  流年: 流年{horoscope.yearly.palace_names[i]}\n"
+                f"    流年星: {format_star_list(horoscope.yearly.stars[i])}\n"
+                f"  流月: 流月{horoscope.monthly.palace_names[i]}\n"
+                f"    流月星: {format_star_list(horoscope.monthly.stars[i])}\n"
+                f"  流日: 流日{horoscope.daily.palace_names[i]}\n"
+                f"    流日星: {format_star_list(horoscope.daily.stars[i])}\n"
+                f"  流时: 流时{horoscope.hourly.palace_names[i]}\n"
+                f"    流时星: {format_star_list(horoscope.hourly.stars[i])}\n"
+            )
+        print("[DEBUG] 排盘文本生成完毕")
+        return '\n'.join(lines)
+    except Exception as e:
+        print("[ERROR] 紫微排盘接口异常：", repr(e))
+        print("[ERROR] Traceback:\n" + traceback.format_exc())
+        return JSONResponse(status_code=400, content={"error": str(e), "traceback": traceback.format_exc()})
+
+@router.post("/ziwei_chart")
+def api_ziwei_chart(
+    birthday: str = Form(..., description="生日，格式YYYY-MM-DD"),
+    birth_time: str = Form(..., description="出生时间，格式HH:MM"),
+    gender: str = Form(..., description="性别，男或女"),
+    date_type: str = Form("公历", description="历法类型，公历或农历")
+):
+    try:
+        hour, minute = map(int, birth_time.split(":"))
+        hour_index = (hour + 1) // 2 % 12
+        # 调用子进程
+        cmd = [
+            sys.executable,  # 当前python解释器
+            "/root/workspace/algorithm_server/ziwei_cli.py",
+            gender,
+            date_type,
+            birthday,
+            str(hour_index)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return JSONResponse(status_code=500, content={"error": "子进程执行失败", "detail": result.stderr})
+        try:
+            data = json.loads(result.stdout)
+        except Exception:
+            return JSONResponse(status_code=500, content={"error": "子进程输出无法解析", "raw": result.stdout})
+        return data
+    except Exception as e:
+        import traceback
+        return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
+
+def get_largest_face_encoding(image_path):
+    img = face_recognition.load_image_file(image_path)
+    # 先缩放图片（如宽度>600则缩放）
+    h, w = img.shape[:2]
+    if w > 600:
+        scale = 600 / w
+        img = cv2.resize(img, (600, int(h * scale)))
+    # 检测所有人脸
+    locations = face_recognition.face_locations(img)
+    if not locations:
+        return None
+    # 选最大人脸
+    areas = [(b-t)*(r-l) for (t, r, b, l) in locations]
+    max_idx = areas.index(max(areas))
+    encoding = face_recognition.face_encodings(img, [locations[max_idx]])
+    return encoding[0] if encoding else None
+
+@router.post("/is_same_face")
+def api_is_same_face(
+    image1: UploadFile = File(...),
+    image2: UploadFile = File(...)
+):
+    try:
+        temp1 = f"/tmp/{image1.filename}"
+        temp2 = f"/tmp/{image2.filename}"
+        with open(temp1, "wb") as f:
+            f.write(image1.file.read())
+        with open(temp2, "wb") as f:
+            f.write(image2.file.read())
+        enc1 = get_largest_face_encoding(temp1)
+        enc2 = get_largest_face_encoding(temp2)
+        if enc1 is None or enc2 is None:
+            return {"is_same_face": False, "error": "未检测到人脸"}
+        distance = float(np.linalg.norm(enc1 - enc2))
+        is_same = distance < 0.6
+        return {"is_same_face": bool(is_same), "distance": distance}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        if os.path.exists(temp1):
+            os.remove(temp1)
+        if os.path.exists(temp2):
+            os.remove(temp2)
+
+@router.post("/extract_face_from_oss_video")
+def extract_face_from_oss_video(
+    oss_url: str = Form(..., description="阿里OSS视频URL")
+):
+    """
+    从阿里OSS视频中抽取人物照片并以base64返回
+    """
+    try:
+        # 下载视频到本地临时文件
+        temp_video = "/tmp/oss_video.mp4"
+        with requests.get(oss_url, stream=True) as r:
+            r.raise_for_status()
+            with open(temp_video, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        # 读取视频帧，检测人脸
+        video = cv2.VideoCapture(temp_video)
+        found_face = False
+        face_img_b64 = None
+        for _ in range(60):  # 检查前60帧
+            ret, frame = video.read()
+            if not ret:
+                break
+            rgb_frame = frame[:, :, ::-1]
+            faces = face_recognition.face_locations(rgb_frame)
+            if faces:
+                top, right, bottom, left = faces[0]
+                face_img = frame[top:bottom, left:right]
+                pil_img = PILImage.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+                buffered = BytesIO()
+                pil_img.save(buffered, format="JPEG")
+                face_img_b64 = base64.b64encode(buffered.getvalue()).decode()
+                found_face = True
+                break
+        video.release()
+        if os.path.exists(temp_video):
+            os.remove(temp_video)
+        if found_face:
+            return {"face_base64": face_img_b64}
+        else:
+            return JSONResponse(status_code=404, content={"error": "未检测到人脸"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 app.include_router(router) 
